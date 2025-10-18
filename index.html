@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapbox KL • 3D OSM Buildings + AI + Weather + Thunder (Native Rain)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- WAJIB: v3.15.0 agar map.setRain tersedia -->
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.15.0/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.15.0/mapbox-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #map{position:absolute;inset:0}
+
+    .panel{position:absolute;z-index:10;background:rgba(20,20,24,.9);color:#fff;padding:10px 12px;border-radius:12px;
+      font-size:12px;line-height:1.4;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+    .legend{left:12px;bottom:12px;min-width:190px}
+    .chip{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:8px;vertical-align:middle}
+    .row{margin:4px 0}
+    .info{right:12px;top:12px;min-width:240px;max-width:320px}
+
+    .chat{position:absolute;right:12px;bottom:12px;width:360px;max-width:calc(100% - 24px);background:rgba(20,20,24,.95);
+      color:#fff;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,.25);display:flex;flex-direction:column;overflow:hidden;z-index:10}
+    .chat-h{padding:10px 12px;font-weight:600;border-bottom:1px solid rgba(255,255,255,.08);display:flex;justify-content:space-between}
+    .chat-b{padding:10px;height:210px;overflow:auto;font-size:12px}
+    .msg{margin:6px 0}.msg.me{text-align:right}.msg .bub{display:inline-block;padding:8px 10px;border-radius:10px;max-width:90%}
+    .msg.me .bub{background:#2563eb}.msg.bot .bub{background:#374151}
+    .chat-i{display:flex;gap:6px;padding:8px;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.2)}
+    .chat-i input{flex:1;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#0f172a;color:#fff}
+    .chat-i button{padding:8px 12px;border:none;border-radius:8px;background:#22c55e;color:#052e16;font-weight:700}
+
+    /* Overlay petir (flash) */
+    #lightning {
+      position: absolute; inset: 0; z-index: 6; pointer-events: none;
+      background: rgba(255,255,255,0); transition: background 120ms ease-out;
+      mix-blend-mode: screen;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="lightning"></div>
+
+  <div class="panel legend" id="legend"></div>
+  <div class="panel info" id="info">Click a building to see attributes.</div>
+
+  <div class="chat" id="chat">
+    <div class="chat-h">
+      <span>AI Map Assistant</span><span id="toggle" style="opacity:.8;cursor:pointer">–</span>
+    </div>
+    <div class="chat-b" id="chatBody">
+      <div class="msg bot"><div class="bub">
+        Try:<br>
+        • <i>use dark style</i> / <i>use satellite</i><br>
+        • <i>set thresholds 10,20,50,100</i><br>
+        • <i>set colors #00ffcc,#3388ff,#ffcc00,#ff5555,#aa88ff</i><br>
+        • <i>show only taller than 80</i> / <i>show all</i> / <i>opacity 0.9</i><br>
+        • <i>rename selected to …</i> / <i>set selected type to …</i> / <i>set selected height 420</i><br>
+        • <i>find name petronas</i> / <i>find type commercial</i> / <i>select id 12345</i><br>
+        • <i>rain 0.8</i> / <i>fog on</i> / <i>rain off</i> / <i>clear weather</i><br>
+        • <i>set rain density 0.6</i> • <i>set rain color #a8adbc</i> • <i>rain direction 0,80</i><br>
+        • <i>set rain droplet-size 2.6,18.2</i> • <i>set rain vignette 1</i> • <i>set rain center-thinning 0.2</i><br>
+        • <i><b>thunder on</b></i> / <i>thunder 0.6</i> / <i>thunder off</i> / <i>strike now</i><br>
+        • <i>explain legend</i> / <i>reset</i>
+      </div></div>
+    </div>
+    <div class="chat-i">
+      <input id="chatInput" placeholder="Type a command…" />
+      <button id="send">Send</button>
+    </div>
+  </div>
+
+<script>
+/* =========================
+   MAPBOX BASE
+   ========================= */
+mapboxgl.accessToken = 'pk.eyJ1Ijoia2V0dXR0b215c3VoYXJpIiwiYSI6ImNrZmdvOWNvazBtM3EycmxkcHF3eXc0OTgifQ.J6kVGmohIIwY-A0hmt0gtg';
+const KL = [101.6869, 3.1390];
+
+let thresholds = [15,30,60,120];
+let colors = ['#a7f3d0','#60a5fa','#fbbf24','#f87171','#a78bfa'];
+let extrusionOpacity = 0.92;
+let minShowHeight = 0;
+
+// Cuaca global
+let currentRainIntensity = 0;
+let currentFogIntensity  = 0;
+let thunderEnabled = false;
+let thunderIntensity = 0;
+let thunderTimer = null;
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  // CONTEK CONTOH: pakai 'standard' style
+  style: 'mapbox://styles/mapbox/standard',
+  center: KL, zoom: 15.5, pitch: 60, bearing: -17.6, antialias: true, hash: true
+});
+map.addControl(new mapboxgl.NavigationControl({ visualizePitch:true }), 'top-right');
+map.addControl(new mapboxgl.FullscreenControl(), 'top-right');
+map.addControl(new mapboxgl.ScaleControl({ maxWidth: 100, unit: 'metric' }));
+
+/* Terrain + sky */
+function enableTerrain(exaggeration=1.0){
+  if (!map.getSource('mapbox-dem')) {
+    map.addSource('mapbox-dem',{ type:'raster-dem', url:'mapbox://mapbox.mapbox-terrain-dem-v1', tileSize:512 });
+  }
+  map.setTerrain({ source:'mapbox-dem', exaggeration });
+  if (!map.getLayer('sky')) {
+    map.addLayer({
+      id:'sky', type:'sky',
+      paint:{
+        'sky-type':'atmosphere',
+        'sky-atmosphere-sun':[0,0],
+        'sky-atmosphere-sun-intensity':10
+      }
+    });
+  }
+}
+
+/* 3D buildings */
+const heightExpr = [
+  'coalesce',
+  ['to-number', ['get','height']],
+  ['*', ['to-number', ['coalesce', ['get','levels'], ['get','building:levels'], 0]], 3]
+];
+function colorStepExpr(){
+  const step = ['step', heightExpr, colors[0]];
+  for (let i=0;i<thresholds.length;i++) step.push(thresholds[i], colors[Math.min(i+1, colors.length-1)]);
+  return step;
+}
+function applyLegend(){
+  const el = document.getElementById('legend');
+  el.innerHTML = `<b>Height Classes</b>` + [
+    `&lt; ${thresholds[0]} m`,
+    `${thresholds[0]}–${thresholds[1]} m`,
+    `${thresholds[1]}–${thresholds[2]} m`,
+    `${thresholds[2]}–${thresholds[3]} m`,
+    `&gt; ${thresholds[3]} m`
+  ].map((lab,i)=>`<div class="row"><span class="chip" style="background:${colors[i]}"></span> ${lab}</div>`).join('');
+}
+let selectedId = null;
+function clearSelected(){
+  if (selectedId!==null){
+    map.setFeatureState({source:'composite',sourceLayer:'building',id:selectedId},{highlighted:false});
+    selectedId=null;
+  }
+}
+function selectId(id){
+  clearSelected();
+  selectedId = id;
+  map.setFeatureState({source:'composite',sourceLayer:'building',id:selectedId},{highlighted:true});
+}
+function add3DLayer(){
+  const layers = map.getStyle().layers;
+  let labelLayerId;
+  for (const l of layers) if (l.type==='symbol' && l.layout && l.layout['text-field']) { labelLayerId = l.id; break; }
+  const highlightColor = ['case', ['boolean', ['feature-state', 'highlighted'], false], '#ffffff', colorStepExpr()];
+
+  if (!map.getLayer('3d-buildings')){
+    map.addLayer({
+      id:'3d-buildings', source:'composite', 'source-layer':'building',
+      filter: ['==', ['get','extrude'], 'true'],
+      type:'fill-extrusion', minzoom:14,
+      paint:{
+        'fill-extrusion-color': highlightColor,
+        'fill-extrusion-height': ['case',
+            ['<', heightExpr, minShowHeight], 0,
+            ['case', ['>=', heightExpr, 1], heightExpr, 15]
+        ],
+        'fill-extrusion-base': ['coalesce', ['to-number', ['get','min_height']], 0],
+        'fill-extrusion-opacity': extrusionOpacity
+      }
+    }, labelLayerId);
+
+    map.on('mousemove','3d-buildings',()=>map.getCanvas().style.cursor='pointer');
+    map.on('mouseleave','3d-buildings',()=>map.getCanvas().style.cursor='');
+    map.on('click','3d-buildings', onClickBuilding);
+  } else {
+    map.setPaintProperty('3d-buildings','fill-extrusion-color', highlightColor);
+    map.setPaintProperty('3d-buildings','fill-extrusion-height', ['case',
+        ['<', heightExpr, minShowHeight], 0,
+        ['case', ['>=', heightExpr, 1], heightExpr, 15]
+    ]);
+    map.setPaintProperty('3d-buildings','fill-extrusion-base', ['coalesce', ['to-number', ['get','min_height']], 0]);
+    map.setPaintProperty('3d-buildings','fill-extrusion-opacity', extrusionOpacity);
+  }
+}
+
+/* Info popup */
+function showInfo(html){ document.getElementById('info').innerHTML = html; }
+function onClickBuilding(e){
+  const f = e.features?.[0]; if (!f) return;
+  const id = f.id ?? null; if (id!==null) selectId(id);
+
+  const st = id!==null ? (map.getFeatureState({source:'composite',sourceLayer:'building',id})||{}) : {};
+  const name = st.name_override ?? f.properties.name ?? 'N/A';
+  const type = st.type_override ?? f.properties.type ?? f.properties.building ?? 'N/A';
+
+  let height = st.height_override;
+  if (!isFinite(height)) {
+    const h = Number(f.properties.height);
+    height = isFinite(h) ? h : (Number(f.properties.levels || f.properties['building:levels'] || 0) * 3);
+  }
+  const levels = st.levels_override ?? (f.properties.levels || f.properties['building:levels'] || 'N/A');
+
+  let area='N/A', volume='N/A';
+  try {
+    const gj = { type:'Feature', geometry:f.geometry, properties:{} };
+    const a = turf.area(gj);
+    if (isFinite(a)) area = Math.round(a);
+    if (isFinite(a) && isFinite(height)) volume = Math.round(a * height);
+  } catch(e){}
+  const lng = e.lngLat.lng.toFixed(5);
+  const lat = e.lngLat.lat.toFixed(5);
+
+  const html = `<b>Selected building</b><br/>
+    ID: <b>${String(id)}</b><br/>
+    Name: <b>${name}</b><br/>
+    Type: <b>${type}</b><br/>
+    Height: <b>${isFinite(height)?height+' m':'N/A'}</b><br/>
+    Levels: <b>${levels}</b><br/>
+    Footprint Area: <b>${area} m²</b><br/>
+    Volume (approx.): <b>${volume} m³</b><br/>
+    Coordinate (Lng, Lat): <b>${lng}, ${lat}</b>`;
+  showInfo(html);
+  new mapboxgl.Popup({ offset:12 }).setLngLat(e.lngLat).setHTML(`<div style="font:13px system-ui">${html}</div>`).addTo(map);
+}
+
+/* Fog (native) */
+function setFog(intensity){
+  currentFogIntensity = Math.max(0, Math.min(1, intensity));
+  const rangeNear = 0.1 + currentFogIntensity * 0.1;
+  const rangeFar  = 10 - currentFogIntensity * 8.5;
+  const gray = Math.round(255 - currentFogIntensity * 110);
+  const fogColor = `rgb(${gray},${gray},${gray})`;
+  try {
+    map.setFog({
+      'range': [rangeNear, Math.max(rangeFar, 1.2)],
+      'color': fogColor,
+      'horizon-blend': 0.1 + 0.5 * currentFogIntensity,
+      'high-color': `rgb(${Math.max(gray-20,0)},${Math.max(gray-20,0)},${Math.max(gray-10,0)})`,
+      'space-color': `rgb(${Math.max(gray-40,0)},${Math.max(gray-40,0)},${Math.max(gray-30,0)})`,
+      'star-intensity': 0.0
+    });
+  } catch(e){}
+  const visibility  = 1 - currentFogIntensity * 0.85;
+  if(map.getLayer('3d-buildings')) {
+    map.setPaintProperty('3d-buildings', 'fill-extrusion-opacity', extrusionOpacity * visibility);
+  }
+  if(map.getLayer('sky')){
+    map.setPaintProperty('sky', 'sky-atmosphere-sun-intensity', 10 * visibility);
+    map.setPaintProperty('sky', 'sky-atmosphere-haze-mass', 0.2 + currentFogIntensity * 0.8);
+  }
+}
+
+/* =========================
+   RAIN (native) — CONTEK CONTOH
+   ========================= */
+let rainState = {
+  density: 0.0,
+  intensity: 0.0,
+  color: '#a8adbc',
+  opacity: 0.7,
+  vignette: 0.0,
+  'vignette-color': '#464646',
+  direction: [0, 80],
+  'droplet-size': [2.6, 18.2],
+  'distortion-strength': 0.7,
+  'center-thinning': 0
+};
+// expression helper dari contoh: transisi antar zoom 11→13
+const zoomBasedReveal = (value) => ([
+  'interpolate', ['linear'], ['zoom'],
+  11, 0.0,
+  13, value
+]);
+
+function applyRain(partial={}){
+  rainState = { ...rainState, ...partial };
+  // clamp beberapa nilai numerik
+  const clamp01 = v => Math.max(0, Math.min(1, v));
+  if (typeof rainState.density === 'number') rainState.density = clamp01(rainState.density);
+  if (typeof rainState.intensity=== 'number') rainState.intensity= clamp01(rainState.intensity);
+  if (typeof rainState.opacity  === 'number') rainState.opacity  = clamp01(rainState.opacity);
+  if (typeof rainState.vignette === 'number') rainState.vignette = clamp01(rainState.vignette);
+  if (typeof rainState['distortion-strength']==='number') rainState['distortion-strength']=clamp01(rainState['distortion-strength']);
+  map.setRain(rainState);
+  // sinkron buat thunder
+  currentRainIntensity = (typeof rainState.intensity==='number') ? rainState.intensity : currentRainIntensity;
+}
+
+/* =========================
+   THUNDER/FLASH (masih ada)
+   ========================= */
+const lightningEl = document.getElementById('lightning');
+let audioCtx=null;
+function ensureAudioCtx(){ if(!audioCtx){const C=window.AudioContext||window.webkitAudioContext; audioCtx=new C();} if(audioCtx.state==='suspended') audioCtx.resume(); return audioCtx; }
+function createNoiseBuffer(d=6){ const ctx=ensureAudioCtx(), sr=ctx.sampleRate, len=Math.floor(d*sr); const b=ctx.createBuffer(1,len,sr); const ch=b.getChannelData(0); for(let i=0;i<len;i++) ch[i]=Math.random()*2-1; return b; }
+function playThunder(strength=1, distance=0.5){
+  const ctx=ensureAudioCtx(), now=ctx.currentTime, src=ctx.createBufferSource(); src.buffer=createNoiseBuffer(6);
+  const lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=200+400*(1-distance);
+  const hp=ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=20;
+  const g=ctx.createGain(); const base=0.4*strength*(0.6+0.4*currentRainIntensity);
+  g.gain.setValueAtTime(0.0001, now);
+  const a=0.02, d1=0.6+0.6*distance, d2=2.5+2.5*distance;
+  g.gain.exponentialRampToValueAtTime(base, now+a);
+  g.gain.exponentialRampToValueAtTime(base*0.2, now+a+d1);
+  g.gain.exponentialRampToValueAtTime(0.0001, now+a+d1+d2);
+  const trem=ctx.createOscillator(); trem.type='sine'; trem.frequency.value=6+Math.random()*4;
+  const tg=ctx.createGain(); tg.gain.value=0.4*base; trem.connect(tg); tg.connect(g.gain);
+  src.connect(lp); lp.connect(hp); hp.connect(g); g.connect(ctx.destination);
+  const delay=0.2+3.3*distance; src.start(now+delay); trem.start(now+delay);
+  src.stop(now+delay+a+d1+d2+0.5); trem.stop(now+delay+a+d1+d2+0.5);
+}
+function flashLightning(strength=1){
+  const flashes=1+Math.floor(Math.random()*2+strength*2); let i=0;
+  const tick=()=>{ const alpha=0.15+0.55*Math.random()*strength; lightningEl.style.transition='background 60ms ease-out'; lightningEl.style.background=`rgba(255,255,255,${alpha})`;
+    setTimeout(()=>{ lightningEl.style.background='rgba(255,255,255,0)'; if(++i<flashes) setTimeout(tick, 40+Math.random()*120); },60);
+  }; tick();
+}
+function lightningStrike({strength=0.8,distance=Math.random()}={}){ flashLightning(strength); playThunder(strength,distance); }
+function scheduleThunderLoop(){
+  if (thunderTimer) clearTimeout(thunderTimer);
+  if (!thunderEnabled || thunderIntensity<=0) return;
+  const baseMin=2200, baseMax=7000, k=1-thunderIntensity, next=baseMin+(baseMax-baseMin)*k*Math.random();
+  thunderTimer=setTimeout(()=>{
+    const rainBoost=0.3+0.7*currentRainIntensity;
+    if (Math.random()<0.75*thunderIntensity*rainBoost+0.1) lightningStrike({strength:0.5+0.5*Math.random(),distance:Math.random()*0.9});
+    scheduleThunderLoop();
+  }, next);
+}
+function setThunder(v){ v=Math.max(0,Math.min(1,v)); thunderIntensity=v; thunderEnabled=v>0; ensureAudioCtx(); scheduleThunderLoop(); }
+function thunderOff(){ thunderEnabled=false; thunderIntensity=0; if(thunderTimer){clearTimeout(thunderTimer);thunderTimer=null;} }
+
+/* =========================
+   CHAT (tambah kontrol rain)
+   ========================= */
+const body = document.getElementById('chatBody');
+const input = document.getElementById('chatInput');
+const send  = document.getElementById('send');
+const toggle= document.getElementById('toggle');
+let collapsed=false;
+toggle.addEventListener('click',()=>{collapsed=!collapsed;
+  document.querySelector('.chat-b').style.display=collapsed?'none':'block';
+  document.querySelector('.chat-i').style.display=collapsed?'none':'flex';
+  toggle.textContent=collapsed?'+':'–';
+});
+function addMsg(t,who='bot'){ const d=document.createElement('div'); d.className=`msg ${who}`; d.innerHTML=`<div class="bub">${t}</div>`; body.appendChild(d); body.scrollTop=body.scrollHeight; }
+
+function parseIntent(t){
+  const s=t.trim(); const tl=s.toLowerCase();
+  if (tl==='/help'||tl==='help') return {a:'help'};
+  if (/(use|switch to).*(dark)/i.test(s)) return {a:'style',v:'mapbox://styles/mapbox/dark-v11'};
+  if (/(use|switch to).*(light)/i.test(s)) return {a:'style',v:'mapbox://styles/mapbox/light-v11'};
+  if (/(use|switch to).*(streets)/i.test(s)) return {a:'style',v:'mapbox://styles/mapbox/streets-v12'};
+  if (/(use|switch to).*(sat|satellite)/i.test(s)) return {a:'style',v:'mapbox://styles/mapbox/satellite-streets-v12'};
+
+  const mThr = tl.match(/(threshold|break|set thresholds?)\s*([\d,\s\.]+)/);
+  if (mThr){ const vals=mThr[2].split(/[,\s]+/).filter(Boolean).map(Number).filter(isFinite); if(vals.length>=4) return {a:'thr',v:vals.slice(0,4).sort((x,y)=>x-y)};}
+  const mCol = s.match(/(set )?colors?\s*([#a-f0-9,\s]+)/i);
+  if (mCol){ 
+    const cols=mCol[2].split(',').map(x=>x.trim()).filter(x=>/^#([a-f0-9]{3}|[a-f0-9]{6})$/i.test(x)); 
+    if(cols.length>=5) return {a:'col',v:cols.slice(0,5)};
+  }
+  const mMin = s.match(/(show only taller than|min height|minimum height)\s*([\d\.]+)/i);
+  if (mMin) return {a:'min',v:parseFloat(mMin[2])};
+  if (/show all/i.test(s)) return {a:'min',v:0};
+  const mOp = tl.match(/opacity\s*([0-1](?:\.\d+)?)/); if (mOp) return {a:'op',v:Math.max(0,Math.min(1,parseFloat(mOp[1])) )};
+
+  const mRename = s.match(/rename selected to (.+)$/i); if (mRename) return {a:'edit',f:'name_override',v:mRename[1].trim()};
+  const mType   = s.match(/set selected type to (.+)$/i); if (mType) return {a:'edit',f:'type_override',v:mType[1].trim()};
+  const mH      = s.match(/set selected height\s*(to)?\s*([\d\.]+)/i); if (mH) return {a:'edit',f:'height_override',v:parseFloat(mH[2])};
+
+  const mFindN  = s.match(/find name (.+)$/i); if (mFindN) return {a:'find',by:'name',q:mFindN[1].trim()};
+  const mFindT  = s.match(/find type (.+)$/i); if (mFindT) return {a:'find',by:'type',q:mFindT[1].trim()};
+  const mSelId  = s.match(/select id\s+(\d+)/i); if (mSelId) return {a:'selid',id:Number(mSelId[1])};
+
+  // Rain/Fog quick
+  const mRainQuick = tl.match(/^rain\s+(on|off|[\d\.]+)$/);
+  if (mRainQuick){
+    const v = mRainQuick[1]==='on' ? 0.8 : (mRainQuick[1]==='off'? 0 : parseFloat(mRainQuick[1]));
+    return {a:'rain_intensity', v};
+  }
+  const mFog = tl.match(/^fog\s+(on|off|[\d\.]+)$/);
+  if (mFog){
+    const v = mFog[1]==='on'?0.8 : (mFog[1]==='off'? 0 : parseFloat(mFog[1]));
+    return {a:'fog', v};
+  }
+  if (/clear weather/i.test(tl)) return {a:'clear'};
+
+  // Set parameter rain detail
+  const mRD = tl.match(/set rain density\s+([\d\.]+)/); if (mRD) return {a:'rain_set',k:'density',v:parseFloat(mRD[1])};
+  const mRO = tl.match(/set rain opacity\s+([\d\.]+)/); if (mRO) return {a:'rain_set',k:'opacity',v:parseFloat(mRO[1])};
+  const mRC = s.match(/set rain color\s+(#[0-9a-fA-F]{3,6})/); if (mRC) return {a:'rain_set',k:'color',v:mRC[1]};
+  const mRV = tl.match(/set rain vignette\s+([\d\.]+)/); if (mRV) return {a:'rain_set',k:'vignette',v:parseFloat(mRV[1])};
+  const mRVC= s.match(/set rain vignette-color\s+(#[0-9a-fA-F]{3,6})/); if (mRVC) return {a:'rain_set',k:'vignette-color',v:mRVC[1]};
+  const mRS = tl.match(/set rain distortion-strength\s+([\d\.]+)/); if (mRS) return {a:'rain_set',k:'distortion-strength',v:parseFloat(mRS[1])};
+  const mRCT= tl.match(/set rain center-thinning\s+([\d\.]+)/); if (mRCT) return {a:'rain_set',k:'center-thinning',v:parseFloat(mRCT[1])};
+  const mRDir = tl.match(/rain direction\s+(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)/); if (mRDir) return {a:'rain_dir',az:parseFloat(mRDir[1]),tilt:parseFloat(mRDir[2])};
+  const mRSize = tl.match(/set rain droplet-size\s+(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)/); if (mRSize) return {a:'rain_size',min:parseFloat(mRSize[1]),max:parseFloat(mRSize[2])};
+
+  // Thunder:
+  const mTh = tl.match(/thunder\s+(on|off|[\d\.]+)/);
+  if (mTh){
+    let val = 0;
+    if (mTh[1]==='on') val = 0.8;
+    else if (mTh[1]==='off') val = 0;
+    else val = parseFloat(mTh[1]);
+    return {a:'thunder', v:val};
+  }
+  if (/strike now/i.test(tl)) return {a:'strike'};
+
+  if (/explain legend/i.test(s)) return {a:'legend'};
+  if (/reset/i.test(s)) return {a:'reset'};
+  return {a:'unknown'};
+}
+
+function refresh(){ add3DLayer(); applyLegend(); }
+
+function handleIntent(it){
+  switch(it.a){
+    case 'help':
+      addMsg(`Commands:
+- use dark style | light | streets | satellite
+- set thresholds 10,20,50,100 | set colors #00ffcc,#3388ff,#ffcc00,#ff5555,#aa88ff
+- show only taller than 80 | show all | opacity 0.9
+- rain on | rain 0.5 | rain off
+- set rain density <0..1> | set rain color #hex | rain direction <az>,<tilt>
+- set rain droplet-size <min>,<max> | set rain vignette <0..1> | set rain center-thinning <0..1> | set rain distortion-strength <0..1>
+- fog on | fog 0.8 | fog off | clear weather
+- thunder on | thunder 0.6 | thunder off | strike now
+- explain legend | reset`);
+      break;
+    case 'style':
+      map.setStyle(it.v);
+      map.once('style.load', ()=>{ enableTerrain(1.0); refresh(); setupWeather(); });
+      addMsg('Style switched.');
+      break;
+    case 'thr':
+      thresholds = it.v; refresh(); addMsg(`Thresholds set: ${thresholds.join(', ')} m.`); break;
+    case 'col':
+      colors = it.v; refresh(); addMsg(`Colors updated.`); break;
+    case 'min':
+      minShowHeight = isFinite(it.v)?it.v:0; refresh();
+      addMsg(minShowHeight>0?`Showing buildings taller than ${minShowHeight} m.`:`Showing all buildings.`); break;
+    case 'op':
+      extrusionOpacity = it.v; refresh(); addMsg(`Extrusion opacity = ${extrusionOpacity}.`); break;
+    case 'edit':
+      if (selectedId===null){ addMsg('No building selected. Click a building first.'); break; }
+      const st = map.getFeatureState({source:'composite',sourceLayer:'building',id:selectedId}) || {};
+      st[it.f] = it.v;
+      map.setFeatureState({source:'composite',sourceLayer:'building',id:selectedId}, st);
+      refresh();
+      addMsg(`Updated selected ${it.f.replace('_override','')}.`);
+      break;
+    case 'find': {
+      const feats = map.queryRenderedFeatures({ layers:['3d-buildings'] });
+      const q = it.q.toLowerCase();
+      const res = feats.filter(f=>{
+        const name = (f.properties.name||'').toLowerCase();
+        const type = (f.properties.type||f.properties.building||'').toLowerCase();
+        return it.by==='name' ? name.includes(q) : type.includes(q);
+      });
+      if (!res.length){ addMsg(`No buildings found by ${it.by} = "${it.q}" in current view.`); break; }
+      res.sort((a,b)=>{
+        const ha = Number(a.properties.height) || Number(a.properties.levels||a.properties['building:levels']||0)*3;
+        const hb = Number(b.properties.height) || Number(b.properties.levels||b.properties['building:levels']||0)*3;
+        return hb - ha;
+      });
+      const target = res[0];
+      const c = turf.centerOfMass({type:'Feature', geometry:target.geometry, properties:{} }).geometry.coordinates;
+      map.flyTo({ center:c, zoom:18, speed:0.6, curve:1.2 });
+      if (target.id!=null) selectId(target.id);
+      onClickBuilding({ features:[target], lngLat:{lng:c[0], lat:c[1]} });
+      addMsg(`Found ${res.length} match(es). Focused the tallest.`);
+      break;
+    }
+    case 'selid': {
+      const feats = map.queryRenderedFeatures({ layers:['3d-buildings'] });
+      const f = feats.find(x=>x.id===it.id);
+      if (!f){ addMsg(`ID ${it.id} not in view.`); break; }
+      selectId(it.id);
+      const c = turf.centerOfMass({type:'Feature', geometry:f.geometry, properties:{} }).geometry.coordinates;
+      map.easeTo({ center:c, zoom:18 });
+      onClickBuilding({ features:[f], lngLat:{lng:c[0], lat:c[1]} });
+      addMsg(`Selected id ${it.id}.`);
+      break;
+    }
+    /* === Weather (native rain) === */
+    case 'rain_intensity': {
+      const v = Math.max(0, Math.min(1, isFinite(it.v)?it.v:0));
+      applyRain({ intensity: v, density: (typeof rainState.density==='number' && rainState.density===0 && v>0)?0.5:rainState.density });
+      addMsg(v>0?`Rain intensity = ${v.toFixed(2)}`:'Rain off.');
+      if (v>0.05 && currentFogIntensity<0.2) setFog(0.2);
+      break;
+    }
+    case 'rain_set':
+      applyRain({ [it.k]: it.v });
+      addMsg(`Rain ${it.k} = ${typeof it.v==='number' && it.v.toFixed ? it.v.toFixed(2) : it.v}`);
+      break;
+    case 'rain_dir':
+      applyRain({ direction: [it.az, it.tilt] });
+      addMsg(`Rain direction = [${it.az}, ${it.tilt}]`);
+      break;
+    case 'rain_size':
+      applyRain({ 'droplet-size': [Math.max(0,it.min), Math.max(it.min,it.max)] });
+      addMsg(`Rain droplet-size = [${it.min}, ${it.max}]`);
+      break;
+    case 'fog':
+      setFog(Math.max(0, Math.min(1, isFinite(it.v)?it.v:0)));
+      addMsg(`Fog intensity = ${currentFogIntensity.toFixed(2)}`);
+      break;
+    case 'clear':
+      applyRain({ intensity:0, density:0, vignette:0 });
+      setFog(0);
+      addMsg('Weather cleared.');
+      break;
+
+    /* === Thunder === */
+    case 'thunder':
+      setThunder(it.v);
+      addMsg(it.v>0?`Thunder intensity = ${it.v.toFixed(2)}`:'Thunder disabled.');
+      break;
+    case 'strike':
+      ensureAudioCtx(); lightningStrike(); addMsg('⚡ Strike!');
+      break;
+
+    case 'legend':
+      addMsg(`Legend (meters):
+1) < ${thresholds[0]} → ${colors[0]}
+2) ${thresholds[0]}–${thresholds[1]} → ${colors[1]}
+3) ${thresholds[1]}–${thresholds[2]} → ${colors[2]}
+4) ${thresholds[2]}–${thresholds[3]} → ${colors[3]}
+5) > ${thresholds[3]} → ${colors[4]}`);
+      break;
+    case 'reset':
+      thresholds=[15,30,60,120]; colors=['#a7f3d0','#60a5fa','#fbbf24','#f87171','#a78bfa']; extrusionOpacity=0.92; minShowHeight=0;
+      applyRain({ intensity:0, density:0, vignette:0 });
+      setFog(0); thunderOff();
+      clearSelected(); refresh(); map.easeTo({ center: KL, zoom:15.5, pitch:60, bearing:-17.6 });
+      addMsg('Reset to defaults.');
+      break;
+    default:
+      addMsg(`I didn't understand. Type /help for commands.`);
+  }
+}
+
+function onSend(){ const t=input.value.trim(); if(!t) return; addMsg(t,'me'); input.value=''; handleIntent(parseIntent(t)); }
+send.addEventListener('click', onSend);
+input.addEventListener('keydown', e=>{ if(e.key==='Enter') onSend(); });
+
+/* =========================
+   BOOT
+   ========================= */
+map.on('style.load', ()=>{
+  // CONTEK CONTOH: preset 'dawn'
+  map.setConfigProperty('basemap', 'lightPreset', 'dawn');
+  enableTerrain(1.0); applyLegend(); add3DLayer();
+
+  // Hujan default persis contoh Mapbox:
+  applyRain({
+    density: zoomBasedReveal(0.5),
+    intensity: 1.0,
+    color: '#a8adbc',
+    opacity: 0.7,
+    vignette: zoomBasedReveal(1.0),
+    'vignette-color': '#464646',
+    direction: [0, 80],
+    'droplet-size': [2.6, 18.2],
+    'distortion-strength': 0.7,
+    'center-thinning': 0
+  });
+
+  setFog(0);
+});
+
+</script>
+</body>
+</html>
