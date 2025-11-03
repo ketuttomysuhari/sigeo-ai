@@ -71,7 +71,7 @@
 /* =========================
    MAPBOX BASE
    ========================= */
-mapboxgl.accessToken = 'pk.eyJ1Ijoia2V0dXR0b215c3VoYXJpIiwiYSI6ImNrZmdvOWNvazBtM3EycmxkcHF3eXc0OTgifQ.J6kVGmohIIwY-A0hmt0gtg';
+mapboxgl.accessToken = '';
 
 /* Koordinat Petronas Twin Towers (KLCC) */
 const PETRONAS = [101.71186, 3.15776]; // [lng, lat]
@@ -118,80 +118,6 @@ function enableTerrain(exaggeration=1.0){
   }
 }
 
-/* =========== 3D Buildings =========== */
-const heightExpr = [
-  'coalesce',
-  ['to-number', ['get','height']],
-  ['*', ['to-number', ['coalesce', ['get','levels'], ['get','building:levels'], 0]], 3]
-];
-function colorStepExpr(){
-  const step = ['step', heightExpr, colors[0]];
-  for (let i=0;i<thresholds.length;i++) step.push(thresholds[i], colors[Math.min(i+1, colors.length-1)]);
-  return step;
-}
-function baseExtrusionColor(){ return '#9aa6b2'; }
-
-function applyLegend(){
-  const el = document.getElementById('legend');
-  const labels = [
-    `&lt; ${thresholds[0]} m`,
-    `${thresholds[0]}–${thresholds[1]} m`,
-    `${thresholds[1]}–${thresholds[2]} m`,
-    `${thresholds[2]}–${thresholds[3]} m`,
-    `&gt; ${thresholds[3]} m`
-  ];
-  el.innerHTML = `<b>Height Classes</b>` + labels.map((lab,i)=>`<div class="row"><span class="chip" style="background:${colors[i]}"></span> ${lab}</div>`).join('');
-}
-function setLegendVisible(show){ document.getElementById('legend').style.display = show ? 'block' : 'none'; }
-
-let selectedId = null;
-function clearSelected(){
-  if (selectedId!==null){ map.setFeatureState({source:'composite',sourceLayer:'building',id:selectedId},{highlighted:false}); selectedId=null; }
-}
-function selectId(id){
-  clearSelected();
-  selectedId = id;
-  map.setFeatureState({source:'composite',sourceLayer:'building',id:selectedId},{highlighted:true});
-}
-
-function add3DLayer(){
-  const layers = map.getStyle().layers;
-  let labelLayerId;
-  for (const l of layers) if (l.type==='symbol' && l.layout && l.layout['text-field']) { labelLayerId = l.id; break; }
-
-  const fillColor = classificationEnabled
-    ? ['case', ['boolean', ['feature-state', 'highlighted'], false], '#ffffff', colorStepExpr()]
-    : ['case', ['boolean', ['feature-state', 'highlighted'], false], '#ffffff', baseExtrusionColor()];
-
-  if (!map.getLayer('3d-buildings')){
-    map.addLayer({
-      id:'3d-buildings', source:'composite', 'source-layer':'building',
-      filter: ['==', ['get','extrude'], 'true'],
-      type:'fill-extrusion', minzoom:14,
-      paint:{
-        'fill-extrusion-color': fillColor,
-        'fill-extrusion-height': ['case',
-            ['<', heightExpr, minShowHeight], 0,
-            ['case', ['>=', heightExpr, 1], heightExpr, 15]
-        ],
-        'fill-extrusion-base': ['coalesce', ['to-number', ['get','min_height']], 0],
-        'fill-extrusion-opacity': extrusionOpacity
-      }
-    }, labelLayerId);
-
-    map.on('mousemove','3d-buildings',()=>map.getCanvas().style.cursor='pointer');
-    map.on('mouseleave','3d-buildings',()=>map.getCanvas().style.cursor='');
-    map.on('click','3d-buildings', onClickBuilding);
-  } else {
-    map.setPaintProperty('3d-buildings','fill-extrusion-color', fillColor);
-    map.setPaintProperty('3d-buildings','fill-extrusion-height', ['case',
-        ['<', heightExpr, minShowHeight], 0,
-        ['case', ['>=', heightExpr, 1], heightExpr, 15]
-    ]);
-    map.setPaintProperty('3d-buildings','fill-extrusion-base', ['coalesce', ['to-number', ['get','min_height']], 0]);
-    map.setPaintProperty('3d-buildings','fill-extrusion-opacity', extrusionOpacity);
-  }
-}
 
 /* Info popup */
 function showInfo(html){ document.getElementById('info').innerHTML = html; }
@@ -266,80 +192,7 @@ function setFog(intensity){
   }
 }
 
-/* =========================
-   RAIN (native) — OFF by default
-   ========================= */
-let rainState = {
-  density: 0.0,
-  intensity: 0.0,
-  color: '#a8adbc',
-  opacity: 0.7,
-  vignette: 0.0,
-  'vignette-color': '#464646',
-  direction: [0, 80],
-  'droplet-size': [2.6, 18.2],
-  'distortion-strength': 0.7,
-  'center-thinning': 0
-};
-const zoomBasedReveal = (value) => ([
-  'interpolate', ['linear'], ['zoom'],
-  11, 0.0,
-  13, value
-]);
-function applyRain(partial={}){
-  rainState = { ...rainState, ...partial };
-  const clamp01 = v => Math.max(0, Math.min(1, v));
-  ['density','intensity','opacity','vignette','distortion-strength','center-thinning'].forEach(k=>{
-    if (typeof rainState[k] === 'number') rainState[k] = clamp01(rainState[k]);
-  });
-  const off = ((+rainState.intensity||0)<=0) && ((+rainState.density||0)<=0);
-  if (off){ map.setRain({ ...rainState, intensity:0, density:0, vignette:0 }); }
-  else { map.setRain(rainState); }
-  currentRainIntensity = (typeof rainState.intensity==='number') ? rainState.intensity : currentRainIntensity;
-}
 
-/* =========================
-   THUNDER/FLASH — OFF by default
-   ========================= */
-const lightningEl = document.getElementById('lightning');
-let audioCtx=null;
-function ensureAudioCtx(){ if(!audioCtx){const C=window.AudioContext||window.webkitAudioContext; audioCtx=new C();} if(audioCtx.state==='suspended') audioCtx.resume(); return audioCtx; }
-function createNoiseBuffer(d=6){ const ctx=ensureAudioCtx(), sr=ctx.sampleRate, len=Math.floor(d*sr); const b=ctx.createBuffer(1,len,sr); const ch=b.getChannelData(0); for(let i=0;i<len;i++) ch[i]=Math.random()*2-1; return b; }
-function playThunder(strength=1, distance=0.5){
-  const ctx=ensureAudioCtx(), now=ctx.currentTime, src=ctx.createBufferSource(); src.buffer=createNoiseBuffer(6);
-  const lp=ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=200+400*(1-distance);
-  const hp=ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=20;
-  const g=ctx.createGain(); const base=0.4*strength*(0.6+0.4*currentRainIntensity);
-  g.gain.setValueAtTime(0.0001, now);
-  const a=0.02, d1=0.6+0.6*distance, d2=2.5+2.5*distance;
-  g.gain.exponentialRampToValueAtTime(base, now+a);
-  g.gain.exponentialRampToValueAtTime(base*0.2, now+a+d1);
-  g.gain.exponentialRampToValueAtTime(0.0001, now+a+d1+d2);
-  const trem=ctx.createOscillator(); trem.type='sine'; trem.frequency.value=6+Math.random()*4;
-  const tg=ctx.createGain(); tg.gain.value=0.4*base; trem.connect(tg); tg.connect(g.gain);
-  src.connect(lp); lp.connect(hp); hp.connect(g); g.connect(ctx.destination);
-  const delay=0.2+3.3*distance; src.start(now+delay); trem.start(now+delay);
-  src.stop(now+delay+a+d1+d2+0.5); trem.stop(now+delay+a+d1+d2+0.5);
-}
-function flashLightning(strength=1){
-  const flashes=1+Math.floor(Math.random()*2+strength*2); let i=0;
-  const tick=()=>{ const alpha=0.15+0.55*Math.random()*strength; lightningEl.style.transition='background 60ms ease-out'; lightningEl.style.background=`rgba(255,255,255,${alpha})`;
-    setTimeout(()=>{ lightningEl.style.background='rgba(255,255,255,0)'; if(++i<flashes) setTimeout(tick, 40+Math.random()*120); },60);
-  }; tick();
-}
-function lightningStrike({strength=0.8,distance=Math.random()}={}){ flashLightning(strength); playThunder(strength,distance); }
-function scheduleThunderLoop(){
-  if (thunderTimer) clearTimeout(thunderTimer);
-  if (!thunderEnabled || thunderIntensity<=0) return;
-  const baseMin=2200, baseMax=7000, k=1-thunderIntensity, next=baseMin+(baseMax-baseMin)*k*Math.random();
-  thunderTimer=setTimeout(()=>{
-    const rainBoost=0.3+0.7*currentRainIntensity;
-    if (Math.random()<0.75*thunderIntensity*rainBoost+0.1) lightningStrike({strength:0.5+0.5*Math.random(),distance:Math.random()*0.9});
-    scheduleThunderLoop();
-  }, next);
-}
-function setThunder(v){ v=Math.max(0,Math.min(1,v)); thunderIntensity=v; thunderEnabled=v>0; ensureAudioCtx(); scheduleThunderLoop(); }
-function thunderOff(){ thunderEnabled=false; thunderIntensity=0; if(thunderTimer){clearTimeout(thunderTimer);thunderTimer=null;} }
 
 /* =========================
    CHAT COMMANDS (+ about)
